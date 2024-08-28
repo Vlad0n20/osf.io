@@ -1,12 +1,12 @@
+import dataclasses
+import logging
+import typing
 from urllib.parse import urlencode, urljoin, urlparse, urlunparse
 
-import logging
-import dataclasses
 import requests
-import typing
 
-from . import auth_helpers
 from website import settings
+from . import auth_helpers
 
 logger = logging.getLogger(__name__)
 
@@ -90,11 +90,11 @@ def get_waterbutler_config(gv_addon_pk, requested_resource, requesting_user):  #
 
 
 def get_gv_result(
-    endpoint_url: str,
-    requesting_user,
-    requested_resource=None,
-    request_method='GET',
-    params: dict = None,
+        endpoint_url: str,
+        requesting_user,
+        requested_resource=None,
+        request_method='GET',
+        params: dict = None,
 ):  # -> JSONAPIResultEntry
     '''Processes the result of a request to a GravyValet detail endpoint into a single JSONAPIResultEntry.'''
     response_json = _make_gv_request(
@@ -104,7 +104,6 @@ def get_gv_result(
         request_method=request_method,
         params=params,
     ).json()
-
     if not response_json['data']:
         return None
     data = response_json['data']
@@ -114,12 +113,32 @@ def get_gv_result(
     return JSONAPIResultEntry(data, included_entities_lookup)
 
 
+def get_gv_result_json(
+        endpoint_url: str,
+        requesting_user,
+        requested_resource=None,
+        request_method='GET',
+        params: dict = None,
+):
+    '''Processes the result of a request to a GravyValet detail endpoint into a single JSONAPIResultEntry.'''
+    response_json = _make_gv_request(
+        endpoint_url=endpoint_url,
+        requesting_user=requesting_user,
+        requested_resource=requested_resource,
+        request_method=request_method,
+        params=params,
+    ).json()
+    if not response_json['data']:
+        return dict()
+    return response_json['data']
+
+
 def iterate_gv_results(
-    endpoint_url: str,
-    requesting_user,
-    requested_resource=None,
-    request_method='GET',
-    params: dict = None,
+        endpoint_url: str,
+        requesting_user,
+        requested_resource=None,
+        request_method='GET',
+        params: dict = None,
 ):  # -> typing.Iterator[JSONAPIResultEntry]
     '''Processes the result of a request to GravyValet list endpoint into a generator of JSONAPIResultEntires.'''
     response_json = _make_gv_request(
@@ -138,11 +157,12 @@ def iterate_gv_results(
 
 
 def _make_gv_request(
-    endpoint_url: str,
-    requesting_user,
-    requested_resource=None,
-    request_method='GET',
-    params: dict = None,
+        endpoint_url: str,
+        requesting_user,
+        requested_resource=None,
+        request_method='GET',
+        params: dict = None,
+        data: dict = None,
 ):
     '''Generates HMAC-Signed auth headers and makes a request to GravyValet, returning the result.'''
     full_url = urlunparse(urlparse(endpoint_url)._replace(query=urlencode(params)))
@@ -154,7 +174,11 @@ def _make_gv_request(
             requested_resource=requested_resource,
         )
     )
-    response = requests.get(endpoint_url, headers=auth_headers, params=params)
+    if request_method == 'POST':
+        auth_headers['Content-Type'] = 'application/vnd.api+json'
+        response = requests.post(endpoint_url, headers=auth_headers, json=data)
+    else:
+        response = requests.get(endpoint_url, headers=auth_headers, params=params)
     if not response.ok:
         # log error to Sentry
         pass
