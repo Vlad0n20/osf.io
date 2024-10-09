@@ -4,7 +4,6 @@ import logging
 
 import jwe
 import jwt
-import waffle
 
 from rest_framework.authentication import BaseAuthentication
 from rest_framework.exceptions import AuthenticationFailed, PermissionDenied
@@ -14,6 +13,7 @@ from addons.osfstorage.models import Region
 
 from api.base.authentication import drf
 from api.base import exceptions, settings
+from api.waffle.utils import flag_is_active
 
 from framework import sentry
 from framework.auth import get_or_create_institutional_user
@@ -25,6 +25,7 @@ from osf.models.institution import SsoFilterCriteriaAction
 
 from website.mails import send_mail, WELCOME_OSF4I, DUPLICATE_ACCOUNTS_OSF4I, ADD_SSO_EMAIL_OSF4I
 from website.settings import OSF_SUPPORT_EMAIL, DOMAIN
+from website.util.metrics import institution_source_tag
 
 logger = logging.getLogger(__name__)
 
@@ -339,7 +340,7 @@ class InstitutionAuthentication(BaseAuthentication):
                 user=user,
                 domain=DOMAIN,
                 osf_support_email=OSF_SUPPORT_EMAIL,
-                storage_flag_is_active=waffle.flag_is_active(request, features.STORAGE_I18N),
+                storage_flag_is_active=flag_is_active(request, features.STORAGE_I18N),
             )
 
         # Add the email to the user's account if it is identified by the eppn
@@ -388,6 +389,8 @@ class InstitutionAuthentication(BaseAuthentication):
                 sso_mail=sso_email,
                 sso_department=department,
             )
+            if is_created:
+                user.add_system_tag(institution_source_tag(secondary_institution._id))
 
         # Storage region is only updated if the user is created via institutional SSO; the region will be set to the
         # institution's preferred one if the user's current region is not in the institution's default region list.

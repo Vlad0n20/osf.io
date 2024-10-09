@@ -52,6 +52,10 @@ from .tag import Tag
 from .user import OSFUser
 from .validators import validate_title, validate_doi
 from framework.auth.core import Auth
+from osf.external.gravy_valet import (
+    request_helpers as gv_requests,
+    translations as gv_translations,
+)
 from osf.utils.datetime_aware_jsonfield import DateTimeAwareJSONField
 from osf.utils.fields import NonNaiveDateTimeField, ensure_str
 from osf.utils.requests import get_request_and_user_id, string_type_request_headers
@@ -697,8 +701,11 @@ class AbstractNode(DirtyFieldsMixin, TypedModel, AddonModelMixin, IdentifierMixi
         if doi:
             csl['DOI'] = doi
 
-        if self.logs.exists():
-            csl['issued'] = datetime_to_csl(self.logs.latest().date)
+        if self.registered_date:
+            csl['issued'] = datetime_to_csl(self.registered_date)
+        else:
+            if self.logs.exists():
+                csl['issued'] = datetime_to_csl(self.logs.latest().date)
 
         return csl
 
@@ -2425,6 +2432,24 @@ class AbstractNode(DirtyFieldsMixin, TypedModel, AddonModelMixin, IdentifierMixi
                     comment='Rejected from collection via system command.',  # typically spam
                     force=True
                 )
+
+    def _get_addon_from_gv(self, gv_pk, requesting_user_id):
+        for item in self._get_addons_from_gv(requesting_user_id):
+            if item.short_name == gv_pk:
+                return item
+
+    def _get_addons_from_gv(self, requesting_user_id):
+        requesting_user = OSFUser.load(requesting_user_id)
+        all_node_addon_data = gv_requests.iterate_addons_for_resource(
+            requested_resource=self,
+            requesting_user=requesting_user
+        )
+        for addon_data in all_node_addon_data:
+            yield gv_translations.make_ephemeral_node_settings(
+                gv_addon_data=addon_data,
+                requested_resource=self,
+                requesting_user=requesting_user
+            )
 
 
 class NodeUserObjectPermission(UserObjectPermissionBase):

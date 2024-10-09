@@ -1,11 +1,14 @@
 import re
+import typing
+
+import dataclasses
 
 from packaging.version import Version
 from django.apps import apps
 from django.db.models import F, Max, Q, Subquery
 from django.utils import timezone
 from django.contrib.contenttypes.models import ContentType
-from rest_framework import generics, permissions as drf_permissions
+from rest_framework import generics, permissions as drf_permissions, exceptions
 from rest_framework.exceptions import PermissionDenied, ValidationError, NotFound, MethodNotAllowed, NotAuthenticated
 from rest_framework.response import Response
 from rest_framework.status import HTTP_202_ACCEPTED, HTTP_204_NO_CONTENT
@@ -57,6 +60,7 @@ from api.base.views import (
     WaterButlerMixin,
 )
 from api.base.waffle_decorators import require_flag
+from api.base.permissions import WriteOrPublicForRelationshipInstitutions
 from api.cedar_metadata_records.serializers import CedarMetadataRecordsListSerializer
 from api.cedar_metadata_records.utils import can_view_record
 from api.citations.utils import render_citation
@@ -66,6 +70,7 @@ from api.comments.serializers import (
     NodeCommentSerializer,
 )
 from api.draft_registrations.serializers import DraftRegistrationSerializer, DraftRegistrationDetailSerializer
+from api.draft_registrations.permissions import DraftRegistrationPermission
 from api.files.serializers import FileSerializer, OsfStorageFileSerializer
 from api.files import annotations as file_annotations
 from api.identifiers.serializers import NodeIdentifierSerializer
@@ -75,7 +80,6 @@ from api.logs.serializers import NodeLogSerializer
 from api.nodes.filters import NodesFilterMixin
 from api.nodes.permissions import (
     IsAdmin,
-    IsAdminContributor,
     IsPublic,
     AdminOrPublic,
     WriteAdmin,
@@ -87,7 +91,6 @@ from api.nodes.permissions import (
     NodeGroupDetailPermissions,
     IsContributorOrGroupMember,
     AdminDeletePermissions,
-    WriteOrPublicForRelationshipInstitutions,
     ExcludeWithdrawals,
     NodeLinksShowIfVersion,
     ReadOnlyIfWithdrawn,
@@ -626,7 +629,7 @@ class NodeDraftRegistrationsList(JSONAPIBaseView, generics.ListCreateAPIView, No
     Use DraftRegistrationsList endpoint instead.
     """
     permission_classes = (
-        IsAdminContributor,
+        DraftRegistrationPermission,
         drf_permissions.IsAuthenticatedOrReadOnly,
         base_permissions.TokenHasScope,
     )
@@ -649,8 +652,11 @@ class NodeDraftRegistrationsList(JSONAPIBaseView, generics.ListCreateAPIView, No
 
     # overrides ListCreateAPIView
     def get_queryset(self):
+        user = self.request.user
         node = self.get_node()
-        return node.draft_registrations_active
+        if user.is_anonymous:
+            raise exceptions.NotAuthenticated()
+        return user.draft_registrations_active.filter(branched_from=node)
 
 
 class NodeDraftRegistrationDetail(JSONAPIBaseView, generics.RetrieveUpdateDestroyAPIView, DraftMixin):
@@ -660,9 +666,9 @@ class NodeDraftRegistrationDetail(JSONAPIBaseView, generics.RetrieveUpdateDestro
     Use DraftRegistrationDetail endpoint instead.
     """
     permission_classes = (
+        DraftRegistrationPermission,
         drf_permissions.IsAuthenticatedOrReadOnly,
         base_permissions.TokenHasScope,
-        IsAdminContributor,
     )
     parser_classes = (JSONAPIMultipleRelationshipsParser, JSONAPIMultipleRelationshipsParserForRegularJSON)
 
@@ -1471,28 +1477,53 @@ class NodeAddonFolderList(JSONAPIBaseView, generics.ListAPIView, NodeMixin, Addo
             raise HTTP_CODE_MAP.get(exc.code, exc)
 
 
+@dataclasses.dataclass
 class NodeStorageProvider:
 
-    def __init__(self, node, provider_name, storage_addon=None):
-        self.path = '/'
-        self.node = node
-        self.kind = 'folder'
-        self.name = provider_name
-        self.provider = provider_name
-        self.node_id = node._id
-        self.pk = node._id
-        self.id = node.id
-        self.root_folder = self._get_root_folder(storage_addon)
+    resource: typing.Any
+    provider_name: str = None
+    provider_settings: typing.Any = None  # NodeSettings or EphemeralSettings
+    path: str = '/'
+    kind: str = 'folder'
+
+    @property
+    def node(self):
+        return self.resource
 
     @property
     def target(self):
-        return self.node
+        return self.resource
 
-    def _get_root_folder(self, storage_addon):
-        if isinstance(self.target, Preprint):
-            return self.target.root_folder
-        else:
-            return storage_addon.root_node if storage_addon else None
+    @property
+    def provider(self):
+        return self.provider_name or self.provider_settings.short_name
+
+    @property
+    def name(self):
+        if self.provider_settings:
+            return self.provider_settings.display_name
+        return self.provider_name
+
+    @property
+    def node_id(self):
+        return self.resource._id
+
+    @property
+    def pk(self):
+        return self.resource._id
+
+    @property
+    def id(self):
+        return self.resource.id
+
+    @property
+    def root_folder(self):
+        if isinstance(self.resource, Preprint):
+            return self.resource.root_folder
+        if self.provider_settings:
+            return self.provider_settings.root_node
+        return None
+
 
 class NodeStorageProvidersList(JSONAPIBaseView, generics.ListAPIView, NodeMixin):
     """The documentation for this endpoint can be found [here](https://developer.osf.io/#operation/nodes_providers_list).
@@ -1513,17 +1544,20 @@ class NodeStorageProvidersList(JSONAPIBaseView, generics.ListAPIView, NodeMixin)
 
     ordering = ('-id',)
 
-    def get_provider_item(self, storage_addon):
-        return NodeStorageProvider(self.get_node(), storage_addon.config.short_name, storage_addon)
+    def get_provider_item(self, storage_addon, node=None):
+        node = node or self.get_node()
+        return NodeStorageProvider(resource=node, provider_settings=storage_addon)
 
     def get_queryset(self):
+        node = self.get_node()
         return [
-            self.get_provider_item(addon)
+            self.get_provider_item(addon, node=node)
             for addon
-            in self.get_node().get_addons()
+            in node.get_addons()
             if addon.config.has_hgrid_files
             and addon.configured
         ]
+
 
 class NodeStorageProviderDetail(JSONAPIBaseView, generics.RetrieveAPIView, NodeMixin):
     """The documentation for this endpoint can be found [here](https://developer.osf.io/#operation/nodes_providers_read).
@@ -1543,7 +1577,8 @@ class NodeStorageProviderDetail(JSONAPIBaseView, generics.RetrieveAPIView, NodeM
     view_name = 'node-storage-provider-detail'
 
     def get_object(self):
-        return NodeStorageProvider(self.get_node(), self.kwargs['provider'])
+        node = self.get_node()
+        return NodeStorageProvider(node, provider_settings=node.get_addon(self.kwargs['provider']))
 
 
 class NodeLogList(JSONAPIBaseView, generics.ListAPIView, NodeMixin, ListFilterMixin):

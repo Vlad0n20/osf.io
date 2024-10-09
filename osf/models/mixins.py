@@ -1,3 +1,4 @@
+import itertools
 import pytz
 import markupsafe
 import logging
@@ -11,6 +12,7 @@ from django.utils.functional import cached_property
 from guardian.shortcuts import assign_perm, get_perms, remove_perm, get_group_perms
 
 from api.providers.workflows import Workflows, PUBLIC_STATES
+from api.waffle.utils import flag_is_active
 from framework import status
 from framework.auth import Auth
 from framework.auth.core import get_user
@@ -32,6 +34,7 @@ from .validators import validate_title
 from .tag import Tag
 from osf.utils import sanitize
 from .validators import validate_subject_hierarchy, validate_email, expand_subject_hierarchy
+from osf import features
 from osf.utils.fields import NonNaiveDateTimeField
 from osf.utils.datetime_aware_jsonfield import DateTimeAwareJSONField
 from osf.utils.machines import (
@@ -297,7 +300,7 @@ class AffiliatedInstitutionMixin(models.Model):
 
     affiliated_institutions = models.ManyToManyField('Institution', related_name='nodes')
 
-    def add_affiliated_institution(self, inst, user, save=False, log=True):
+    def add_affiliated_institution(self, inst, user, log=True):
         if not user.is_affiliated_with_institution(inst):
             raise UserNotAffiliatedError(f'User is not affiliated with {inst.name}')
         if not self.is_affiliated_with_institution(inst):
@@ -471,6 +474,8 @@ class AddonModelMixin(models.Model):
     settings_type = None
     ADDONS_AVAILABLE = sorted([config for config in apps.get_app_configs() if config.name.startswith('addons.') and
         config.label != 'base'], key=lambda config: config.name)
+    # These addon configurations will continue to live in the OSF for the foreseeable future
+    OSF_HOSTED_ADDONS = ['forward', 'osfstorage', 'twofactor', 'wiki']
 
     class Meta:
         abstract = True
@@ -484,6 +489,14 @@ class AddonModelMixin(models.Model):
         return self.get_addons()
 
     def get_addons(self):
+        request, user_id = get_request_and_user_id()
+        if flag_is_active(request, features.ENABLE_GV):
+            osf_addons = filter(
+                lambda x: x is not None,
+                (self.get_addon(addon) for addon in self.OSF_HOSTED_ADDONS)
+            )
+            return itertools.chain(osf_addons, self._get_addons_from_gv(requesting_user_id=user_id))
+
         return [_f for _f in [
             self.get_addon(config.short_name)
             for config in self.ADDONS_AVAILABLE
@@ -511,6 +524,12 @@ class AddonModelMixin(models.Model):
         return self.add_addon(name, *args, **kwargs)
 
     def get_addon(self, name, is_deleted=False):
+        # Avoid test-breakages by avoiding early access to the request context
+        if name not in self.OSF_HOSTED_ADDONS:
+            request, user_id = get_request_and_user_id()
+            if flag_is_active(request, features.ENABLE_GV):
+                return self._get_addon_from_gv(gv_pk=name, requesting_user_id=user_id)
+
         try:
             settings_model = self._settings_model(name)
         except LookupError:
@@ -1451,22 +1470,29 @@ class ContributorMixin(models.Model):
         # Create a new user record if you weren't passed an existing user
         contributor = existing_user if existing_user else OSFUser.create_unregistered(fullname=fullname, email=email)
 
-        contributor.add_unclaimed_record(self, referrer=auth.user,
-                                         given_name=fullname, email=email)
         try:
-            contributor.save()
-        except ValidationError:  # User with same email already exists
-            contributor = get_user(email=email)
-            # Unregistered users may have multiple unclaimed records, so
-            # only raise error if user is registered.
-            if contributor.is_registered or self.is_contributor(contributor):
-                raise
-
             contributor.add_unclaimed_record(
-                self, referrer=auth.user, given_name=fullname, email=email
+                self,
+                referrer=auth.user,
+                given_name=fullname,
+                email=email,
             )
+        except ValidationError as e:
+            if 'Osf user with this Username already exists.' in e.message_dict.get('username'):
+                contributor = get_user(email=email)
+                # Unregistered users may have multiple unclaimed records, so
+                # only raise error if user is registered.
+                if contributor.is_registered or self.is_contributor(contributor):
+                    raise
 
-            contributor.save()
+                contributor.add_unclaimed_record(
+                    self,
+                    referrer=auth.user,
+                    given_name=fullname,
+                    email=email,
+                )
+            else:
+                raise e
 
         self.add_contributor(
             contributor, permissions=permissions, auth=auth,

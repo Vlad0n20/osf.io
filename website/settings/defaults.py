@@ -105,6 +105,7 @@ ALLOW_LOGIN = True
 
 SEARCH_ENGINE = 'elastic'  # Can be 'elastic', or None
 ELASTIC_URI = '127.0.0.1:9200'
+ELASTIC6_URI = os.environ.get('ELASTIC6_URI', '127.0.0.1:9201')
 ELASTIC_TIMEOUT = 10
 ELASTIC_INDEX = 'website'
 ELASTIC_KWARGS = {
@@ -319,7 +320,7 @@ DEFAULT_HMAC_SECRET = 'changeme'
 DEFAULT_HMAC_ALGORITHM = hashlib.sha256
 WATERBUTLER_URL = 'http://localhost:7777'
 WATERBUTLER_INTERNAL_URL = WATERBUTLER_URL
-GRAVYVALET_URL = 'https://localhost:8004'
+GRAVYVALET_URL = 'http://192.168.168.167:8004'
 
 ####################
 #   Identifiers   #
@@ -619,7 +620,7 @@ class CeleryConfig:
                 'kwargs': {'dry_run': False},
             },
             'clear_expired_sessions': {
-                'task': 'management.commands.clear_expired_sessions',
+                'task': 'osf.management.commands.clear_expired_sessions',
                 'schedule': crontab(minute=0, hour=5),  # Daily 12 a.m
                 'kwargs': {'dry_run': False},
             },

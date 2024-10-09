@@ -17,7 +17,7 @@ API_BASE = urljoin(settings.GRAVYVALET_URL, 'v1/')
 # {{placeholder}} format allows f-string to return a formatable string
 ACCOUNT_ENDPOINT = f'{API_BASE}authorized-storage-accounts/{{pk}}'
 ADDON_ENDPOINT = f'{API_BASE}configured-storage-addons/{{pk}}'
-WB_CONFIG_ENDPOINT = f'{ADDON_ENDPOINT}/waterbutler-config'
+WB_CONFIG_ENDPOINT = f'{ADDON_ENDPOINT}/waterbutler-credentials'
 
 USER_LIST_ENDPOINT = f'{API_BASE}user-references'
 USER_DETAIL_ENDPOINT = f'{API_BASE}user-references/{{pk}}'
@@ -110,7 +110,8 @@ def get_gv_result(
         request_method=request_method,
         params=params,
     ).json()
-    if not response_json['data']:
+
+    if not response_json.get('data'):
         return None
     data = response_json['data']
     if isinstance(data, list):
@@ -171,7 +172,7 @@ def _make_gv_request(
         data: dict = None,
 ):
     '''Generates HMAC-Signed auth headers and makes a request to GravyValet, returning the result.'''
-    full_url = urlunparse(urlparse(endpoint_url)._replace(query=urlencode(params)))
+    full_url = urlunparse(urlparse(endpoint_url)._replace(query=urlencode(params or {})))
     auth_headers = auth_helpers.make_gravy_valet_hmac_headers(
         request_url=full_url,
         request_method=request_method,
@@ -355,7 +356,8 @@ class JSONAPIResultEntry:
         self.resource_type = result_entry['type']
         self.resource_id = result_entry['id']
         self._attributes = dict(result_entry['attributes'])
-        self._relationships = _extract_relationships(result_entry['relationships'])
+        if 'relationships' in result_entry:
+            self._relationships = _extract_relationships(result_entry['relationships'])
         self._includes = {}
         if included_entities_lookup:
             self.extract_included_relationships(included_entities_lookup)

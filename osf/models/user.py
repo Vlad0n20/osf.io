@@ -35,6 +35,10 @@ from framework.auth.exceptions import (ChangePasswordError, ExpiredTokenError,
 from framework.exceptions import PermissionsError
 from framework.sessions.utils import remove_sessions_for_user
 from api.share.utils import update_share
+from osf.external.gravy_valet import (
+    request_helpers as gv_requests,
+    translations as gv_translations,
+)
 from osf.utils.requests import get_current_request
 from osf.exceptions import reraise_django_validation_errors, UserStateError
 from .base import BaseModel, GuidMixin, GuidMixinQuerySet
@@ -55,7 +59,7 @@ from osf.utils.permissions import API_CONTRIBUTOR_PERMISSIONS, MANAGER, MEMBER, 
 from website import settings as website_settings
 from website import filters, mails
 from website.project import new_bookmark_collection
-from website.util.metrics import OsfSourceTags
+from website.util.metrics import OsfSourceTags, unregistered_created_source_tag
 from importlib import import_module
 from osf.utils.requests import get_headers_from_request
 
@@ -1662,6 +1666,10 @@ class OSFUser(DirtyFieldsMixin, GuidMixin, BaseModel, AbstractBaseUser, Permissi
             'email': clean_email,
         }
         self.unclaimed_records[pid] = record
+
+        self.save()  # must save for PK to add system tags
+        self.add_system_tag(unregistered_created_source_tag(referrer_id))
+
         return record
 
     def get_unclaimed_record(self, project_id):
@@ -1901,6 +1909,34 @@ class OSFUser(DirtyFieldsMixin, GuidMixin, BaseModel, AbstractBaseUser, Permissi
             self.save()
 
         return is_spam
+
+    def _get_addon_from_gv(self, gv_pk, requesting_user_id):
+        requesting_user = OSFUser.load(requesting_user_id)
+        if requesting_user and requesting_user != self:
+            raise ValueError('Cannot get user addons for a user other than self')
+
+        gv_account_data = gv_requests.get_account(
+            gv_account_pk=gv_pk,
+            requesting_user=self,
+        )
+        return gv_translations.make_ephemeral_node_settings(
+            gv_account_data=gv_account_data,
+            requesting_user=self,
+        )
+
+    def _get_addons_from_gv(self, requesting_user_id):
+        requesting_user = OSFUser.load(requesting_user_id)
+        if requesting_user and requesting_user != self:
+            raise ValueError('Cannot get user addons for a user other than self')
+
+        all_user_account_data = gv_requests.iterate_accounts_for_user(
+            requesting_user=self,
+        )
+        for account_data in all_user_account_data:
+            yield gv_translations.make_ephemeral_user_settings(
+                gv_account_data=account_data,
+                requesting_user=self,
+            )
 
     def _validate_admin_status_for_gdpr_delete(self, resource):
         """
